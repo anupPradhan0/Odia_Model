@@ -19,8 +19,9 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from tqdm import tqdm
 
 
-FONTS_FOLDER = "./fonts"
-OUTPUT_FOLDER = "./odia_dataset"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+FONTS_FOLDER = PROJECT_ROOT / "assets" / "fonts"
+OUTPUT_FOLDER = PROJECT_ROOT / "odia_dataset"
 NUM_IMAGES = 10000
 IMAGE_WIDTH = 512
 IMAGE_HEIGHT = 64
@@ -90,8 +91,8 @@ def parse_args() -> GeneratorConfig:
     parser.add_argument("--preview", action="store_true", help="Generate only preview samples.")
     parser.add_argument("--show-preview", action="store_true", help="Attempt to open preview images after generation.")
     parser.add_argument("--num-images", type=int, default=NUM_IMAGES, help="Total number of images to generate.")
-    parser.add_argument("--fonts-folder", default=FONTS_FOLDER, help="Folder containing Odia .ttf fonts.")
-    parser.add_argument("--output-folder", default=OUTPUT_FOLDER, help="Output dataset directory.")
+    parser.add_argument("--fonts-folder", default=str(FONTS_FOLDER), help="Folder containing Odia .ttf fonts.")
+    parser.add_argument("--output-folder", default=str(OUTPUT_FOLDER), help="Output dataset directory.")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED, help="Random seed.")
     parser.add_argument(
         "--target-sentences",
