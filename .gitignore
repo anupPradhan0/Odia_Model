@@ -63,3 +63,5 @@ dmypy.json
 *.swo
 *~
 .DS_Store
+
+saved_model/model.safetensors

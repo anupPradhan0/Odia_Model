@@ -1,0 +1,22 @@
+{
+  "config": {
+    "model_name": "microsoft/trocr-base-handwritten",
+    "dataset_root": "/home/mors/Code/odia_Model/odia_dataset",
+    "output_dir": "/home/mors/Code/odia_Model/saved_model",
+    "batch_size": 1,
+    "learning_rate": 5e-05,
+    "epochs": 1,
+    "max_target_length": 128,
+    "num_beams": 1,
+    "num_workers": 2,
+    "seed": 42,
+    "device": "cuda",
+    "use_mixed_precision": true,
+    "use_8bit_adam": true,
+    "grad_accum_steps": 8,
+    "eval_samples": 500
+  },
+  "best_cer": 1.0240334378265412,
+  "best_epoch": 1,
+  "saved_at": "2026-03-13 12:56:13"
+}

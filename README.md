@@ -69,6 +69,37 @@ The `train_labels.csv` and `test_labels.csv` files contain:
 - `image_name`: relative image path like `train/img_00001.jpg`
 - `text`: exact Odia text rendered into that image
 
+## Validate Labels
+
+Before training, validate the CSV files against the generated images:
+
+```bash
+python scripts/validate_labels.py
+```
+
+Optional JSON report:
+
+```bash
+python scripts/validate_labels.py --report-json validation_report.json
+```
+
+## Fine-tune TrOCR
+
+Install the training dependencies in the same virtual environment. Keep the CUDA-enabled PyTorch install separate so the correct wheel is used:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements.txt
+```
+
+Run training:
+
+```bash
+python scripts/finetune_trocr.py
+```
+
+The best checkpoint is saved to `saved_model/` using the lowest CER on the test split.
+
 ## Notes
 
 - The script uses sentence-level train/test splitting to reduce text leakage across splits.
