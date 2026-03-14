@@ -1,59 +1,72 @@
-# Odia Synthetic Dataset Generator
+# Odia Model — Read & Understand Odia Text
 
-This project generates a synthetic Odia OCR dataset for fine-tuning TrOCR. It scrapes Odia text from Wikipedia, cleans it into sentences, renders those sentences into images using Odia-capable fonts, applies mild augmentations, and writes train and test labels automatically.
+**Goal:** Build tools so machines can **read** Odia (ଓଡ଼ିଆ) the way people do — from real, human-written Odia sentences and documents — and turn that into text a computer can work with (and later, understand).
 
-## Structure
+This repo is a practical first step: **synthetic Odia OCR data** plus **TrOCR fine-tuning**, so a model learns to recognize Odia script in images. That’s the bridge from “pixels of Odia” to “Unicode Odia text” you can search, translate, or feed into larger language models.
 
-- `scripts/`: runnable Python scripts
-- `assets/fonts/`: Odia font files used by the generator
-- `docs/`: project notes and planning docs
-- `odia_dataset/`: generated dataset output
-- `requirements.txt`: Python dependencies
+## What this project does
+
+| Piece | Purpose |
+|--------|--------|
+| **Dataset generator** | Pulls Odia text (e.g. from Wikipedia), cleans it into sentences, renders it with Odia fonts, augments lightly, and writes **image + label** pairs for training. |
+| **TrOCR fine-tuning** | Trains a text-recognition model on those pairs so it can **read Odia from images** (screenshots, scans, rendered pages). |
+| **Validation** | Checks that labels match generated images before you train. |
+
+Longer-term, the same pipeline supports anything built on **human-readable Odia**: OCR for books and web, accessibility, and downstream NLP once text is extracted.
+
+## Repository layout
+
+- `scripts/` — runnable Python scripts (generate data, validate, fine-tune)
+- `assets/fonts/` — Odia-capable `.ttf` fonts used when rendering text to images
+- `docs/` — notes and planning
+- `odia_dataset/` — generated dataset (train/test images + CSV labels)
+- `saved_model/` — fine-tuned TrOCR checkpoint (after training)
+- `requirements.txt` — Python dependencies
 
 ## Setup
 
-1. Create and activate a Python 3.10+ virtual environment.
+1. Use **Python 3.10+** and a virtual environment.
 2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Add Odia `.ttf` fonts into `assets/fonts/` such as:
+3. Put Odia fonts in `assets/fonts/`, for example:
 
-- Baloo Bhaina 2
-- Noto Sans Oriya
-- Utkal
+   - Baloo Bhaina 2  
+   - Noto Sans Oriya  
+   - Utkal  
 
-The script validates each font and skips any font that cannot render a known Odia sample string.
+   The generator checks each font and skips fonts that can’t render a known Odia sample.
 
 ## Usage
 
-Preview 10 images first:
+**Preview** (small run, check quality first):
 
 ```bash
 python scripts/generate_odia_data.py --preview
 ```
 
-If your environment supports image viewers, you can also try:
+Optional: open previews if your environment has a viewer:
 
 ```bash
 python scripts/generate_odia_data.py --preview --show-preview
 ```
 
-Generate the full dataset:
+**Full dataset:**
 
 ```bash
 python scripts/generate_odia_data.py
 ```
 
-Optional overrides:
+**Overrides:**
 
 ```bash
 python scripts/generate_odia_data.py --num-images 5000 --fonts-folder ./assets/fonts --output-folder ./odia_dataset
 ```
 
-## Output Structure
+## Dataset output
 
 ```text
 odia_dataset/
@@ -64,14 +77,12 @@ odia_dataset/
 └── odia_sentences.txt
 ```
 
-The `train_labels.csv` and `test_labels.csv` files contain:
+`train_labels.csv` / `test_labels.csv` columns:
 
-- `image_name`: relative image path like `train/img_00001.jpg`
-- `text`: exact Odia text rendered into that image
+- `image_name` — e.g. `train/img_00001.jpg`
+- `text` — exact Odia string rendered in that image
 
-## Validate Labels
-
-Before training, validate the CSV files against the generated images:
+## Validate labels
 
 ```bash
 python scripts/validate_labels.py
@@ -83,26 +94,35 @@ Optional JSON report:
 python scripts/validate_labels.py --report-json validation_report.json
 ```
 
-## Fine-tune TrOCR
+## Fine-tune TrOCR (GPU)
 
-Install the training dependencies in the same virtual environment. Keep the CUDA-enabled PyTorch install separate so the correct wheel is used:
+Install CUDA PyTorch in the same venv (pick the wheel that matches your CUDA):
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 ```
 
-Run training:
+Train:
 
 ```bash
 python scripts/finetune_trocr.py
 ```
 
-The best checkpoint is saved to `saved_model/` using the lowest CER on the test split.
+Best checkpoint by test **CER** is saved under `saved_model/`.
 
 ## Notes
 
-- The script uses sentence-level train/test splitting to reduce text leakage across splits.
-- Preview mode writes files into `odia_dataset/preview/` so quality can be checked before large runs.
-- If Wikipedia scraping returns too little text or fails, the script falls back to a small built-in Odia sentence list so the pipeline remains testable.
-- Pillow rendering is used as requested, but Odia shaping quality depends on the selected fonts and Pillow's rendering behavior. Always inspect preview output before generating a large dataset.
+- Train/test split is **sentence-level** to limit text leakage between splits.
+- Preview files go to `odia_dataset/preview/` so you can judge font/shaping before big runs.
+- If Wikipedia scraping is thin or fails, the script falls back to a small built-in Odia sentence list so the pipeline still runs.
+- Rendering quality depends on **fonts** and **Pillow**; always inspect previews before large generations.
+
+## Roadmap (idea)
+
+- More diverse **human Odia** sources (news, books, user contributions).  
+- Stronger OCR + optional **Odia NLP** (tokenization, summarization, Q&A) on top of recognized text.
+
+---
+
+*Contributions welcome — especially more Odia text sources and evaluation on real-world Odia images.*
