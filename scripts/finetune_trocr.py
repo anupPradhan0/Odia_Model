@@ -48,7 +48,10 @@ class TrainingConfig:
     use_mixed_precision: bool
     use_8bit_adam: bool
     grad_accum_steps: int
-    eval_samples: int  # max test samples per eval; -1 = all
+    eval_samples: int  # max validation samples per eval; -1 = all
+    val_ratio: float
+    auto_resume: bool
+    resume_checkpoint: Path | None
 
 
 class OdiaOCRDataset(Dataset):
@@ -119,9 +122,32 @@ def parse_args() -> TrainingConfig:
         "--eval-samples",
         type=int,
         default=500,
-        help="Max number of test samples used for evaluation each epoch. -1 = use all 2000. Default: 500.",
+        help="Max number of validation samples used for evaluation each epoch. -1 = use all validation samples. Default: 500.",
     )
-    parser.set_defaults(use_mixed_precision=True, use_8bit_adam=True)
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.1,
+        help="Fraction of train split used as validation (0 < val_ratio < 1). Default: 0.1.",
+    )
+    parser.add_argument(
+        "--auto-resume",
+        dest="auto_resume",
+        action="store_true",
+        help="Resume from the latest local checkpoint if available.",
+    )
+    parser.add_argument(
+        "--no-auto-resume",
+        dest="auto_resume",
+        action="store_false",
+        help="Start training from scratch even when a local checkpoint exists.",
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        default=None,
+        help="Optional path to a specific checkpoint .pt file.",
+    )
+    parser.set_defaults(use_mixed_precision=True, use_8bit_adam=True, auto_resume=True)
     args = parser.parse_args()
     return TrainingConfig(
         model_name=args.model_name,
@@ -139,6 +165,9 @@ def parse_args() -> TrainingConfig:
         use_8bit_adam=args.use_8bit_adam,
         grad_accum_steps=args.grad_accum_steps,
         eval_samples=args.eval_samples,
+        val_ratio=args.val_ratio,
+        auto_resume=args.auto_resume,
+        resume_checkpoint=Path(args.resume_checkpoint).resolve() if args.resume_checkpoint else None,
     )
 
 
@@ -217,14 +246,59 @@ def evaluate(
     return cer(references, predictions)
 
 
-def save_metadata(output_dir: Path, config: TrainingConfig, best_cer: float, best_epoch: int) -> None:
+def save_metadata(
+    output_dir: Path,
+    config: TrainingConfig,
+    best_cer: float,
+    best_epoch: int,
+    final_test_cer: float | None = None,
+) -> None:
     metadata = {
         "config": asdict(config),
         "best_cer": best_cer,
         "best_epoch": best_epoch,
+        "final_test_cer": final_test_cer,
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     (output_dir / "training_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+
+
+def get_latest_checkpoint_path(output_dir: Path) -> Path:
+    return output_dir / "latest_checkpoint.pt"
+
+
+def save_checkpoint(
+    checkpoint_path: Path,
+    model: VisionEncoderDecoderModel,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    best_cer: float,
+    best_epoch: int,
+) -> None:
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "best_cer": best_cer,
+        "best_epoch": best_epoch,
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    torch.save(checkpoint, checkpoint_path)
+
+
+def load_checkpoint(
+    checkpoint_path: Path,
+    model: VisionEncoderDecoderModel,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> tuple[int, float, int]:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    last_completed_epoch = int(checkpoint.get("epoch", 0))
+    best_cer = float(checkpoint.get("best_cer", float("inf")))
+    best_epoch = int(checkpoint.get("best_epoch", 0))
+    return last_completed_epoch, best_cer, best_epoch
 
 
 def main() -> None:
@@ -242,6 +316,22 @@ def main() -> None:
     use_amp = config.use_mixed_precision and device.type == "cuda"
     train_df = load_split(config.dataset_root, "train")
     test_df = load_split(config.dataset_root, "test")
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not 0.0 < config.val_ratio < 1.0:
+        raise ValueError("val_ratio must be between 0 and 1 (exclusive).")
+
+    train_indices = np.arange(len(train_df))
+    rng = np.random.default_rng(config.seed)
+    rng.shuffle(train_indices)
+    val_count = max(1, int(len(train_df) * config.val_ratio))
+    val_indices = train_indices[:val_count]
+    fit_indices = train_indices[val_count:]
+    if len(fit_indices) == 0:
+        raise ValueError("val_ratio is too high; no samples left for training.")
+
+    fit_df = train_df.iloc[fit_indices].reset_index(drop=True)
+    val_df = train_df.iloc[val_indices].reset_index(drop=True)
 
     processor = TrOCRProcessor.from_pretrained(config.model_name, use_fast=False)
     model = VisionEncoderDecoderModel.from_pretrained(config.model_name)
@@ -257,15 +347,24 @@ def main() -> None:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         print("Model weights converted to FP16 and gradient checkpointing enabled.")
 
-    train_dataset = OdiaOCRDataset(train_df, config.dataset_root)
-    eval_df = test_df if config.eval_samples < 0 else test_df.iloc[: config.eval_samples]
-    test_dataset = OdiaOCRDataset(eval_df, config.dataset_root)
+    train_dataset = OdiaOCRDataset(fit_df, config.dataset_root)
+    eval_df = val_df if config.eval_samples < 0 else val_df.iloc[: config.eval_samples]
+    eval_dataset = OdiaOCRDataset(eval_df, config.dataset_root)
+    test_dataset = OdiaOCRDataset(test_df, config.dataset_root)
     collate_fn = build_collate_fn(processor, config.max_target_length)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
+        num_workers=config.num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=collate_fn,
+    )
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
         num_workers=config.num_workers,
         pin_memory=device.type == "cuda",
         collate_fn=collate_fn,
@@ -278,7 +377,8 @@ def main() -> None:
         pin_memory=device.type == "cuda",
         collate_fn=collate_fn,
     )
-    print(f"Evaluating on {len(eval_df)} test samples per epoch (pass --eval-samples -1 for all 2000).")
+    print(f"Train samples: {len(fit_df)}, validation samples: {len(val_df)}, test samples: {len(test_df)}")
+    print(f"Evaluating on {len(eval_df)} validation samples per epoch (pass --eval-samples -1 for full validation).")
 
     if config.use_8bit_adam and _BNB_AVAILABLE and device.type == "cuda":
         optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=config.learning_rate)
@@ -292,14 +392,31 @@ def main() -> None:
     # so gradients are FP16 too. GradScaler expects FP32 grads — combining them raises an error.
     best_cer = float("inf")
     best_epoch = 0
-    config.output_dir.mkdir(parents=True, exist_ok=True)
+    last_completed_epoch = 0
+    checkpoint_path = config.resume_checkpoint or get_latest_checkpoint_path(config.output_dir)
 
-    for epoch in range(1, config.epochs + 1):
+    if config.auto_resume and checkpoint_path.exists():
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        last_completed_epoch, best_cer, best_epoch = load_checkpoint(
+            checkpoint_path=checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            device=device,
+        )
+        print(f"Resumed at epoch {last_completed_epoch}. Next epoch: {last_completed_epoch + 1}")
+    elif config.resume_checkpoint and not checkpoint_path.exists():
+        raise FileNotFoundError(f"Requested checkpoint not found: {checkpoint_path}")
+
+    start_epoch = last_completed_epoch + 1
+    end_epoch = last_completed_epoch + config.epochs
+    print(f"Training this run for epochs {start_epoch} to {end_epoch}.")
+
+    for epoch in range(start_epoch, end_epoch + 1):
         model.train()
         running_loss = 0.0
 
         accum_steps = max(1, config.grad_accum_steps)
-        for step_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{config.epochs}", unit="batch")):
+        for step_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{end_epoch}", unit="batch")):
             pixel_values = batch["pixel_values"].to(device)
             if use_amp:
                 pixel_values = pixel_values.half()
@@ -321,20 +438,40 @@ def main() -> None:
         cer_score = evaluate(
             model=model,
             processor=processor,
-            dataloader=test_loader,
+            dataloader=eval_loader,
             device=device,
             max_target_length=config.max_target_length,
             num_beams=config.num_beams,
             use_mixed_precision=config.use_mixed_precision,
         )
-        print(f"Epoch {epoch}: train_loss={average_loss:.4f} cer={cer_score:.4f}")
+        print(f"Epoch {epoch}: train_loss={average_loss:.4f} val_cer={cer_score:.4f}")
 
         if cer_score < best_cer:
             best_cer = cer_score
             best_epoch = epoch
             model.save_pretrained(config.output_dir)
             processor.save_pretrained(config.output_dir)
-            save_metadata(config.output_dir, config, best_cer, best_epoch)
+        save_checkpoint(
+            checkpoint_path=get_latest_checkpoint_path(config.output_dir),
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch,
+            best_cer=best_cer,
+            best_epoch=best_epoch,
+        )
+        save_metadata(config.output_dir, config, best_cer, best_epoch)
+
+    final_test_cer = evaluate(
+        model=model,
+        processor=processor,
+        dataloader=test_loader,
+        device=device,
+        max_target_length=config.max_target_length,
+        num_beams=config.num_beams,
+        use_mixed_precision=config.use_mixed_precision,
+    )
+    save_metadata(config.output_dir, config, best_cer, best_epoch, final_test_cer=final_test_cer)
+    print(f"Final test CER (one-time evaluation): {final_test_cer:.4f}")
 
     print(f"Best model saved to {config.output_dir} with CER={best_cer:.4f} at epoch {best_epoch}")
 
